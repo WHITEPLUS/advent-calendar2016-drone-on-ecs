@@ -26,12 +26,12 @@
         },
 
         "DroneMemoryAllocation": {
-          "Type": "Integer",
+          "Type": "Number",
           "Description": "The amount of memory to allocate to the Drone container",
           "Default": 1024
         },
         "DroneCpuUnits": {
-          "Type": "Integer",
+          "Type": "Number",
           "Description": "How many CPU units to allocate to the Drone container",
           "Default": 512
         },
