@@ -15,6 +15,10 @@
             "Description": "Name of an AWS keypair to use on instances"
         },
 
+        "CertificateArn": {
+            "Type": "String"
+        },
+
         "DroneRemoteConfig": {
             "Type": "String",
             "Description": "The remote config value for Drone",
@@ -118,14 +122,14 @@
                 "VpcId": {"Ref": "VPC"},
                 "SecurityGroupIngress": [
                     {
-                        "FromPort": 80,
-                        "ToPort": 80,
+                        "FromPort": 443,
+                        "ToPort": 443,
                         "IpProtocol": "tcp",
                         "CidrIp": {"Ref": "IncomingHttpCidr"}
                     }
                 ],
                 "Tags": [
-                    {"Key": "Name", "Value": "droneci-loadbalancer-sg"}
+                    {"Key": "Name", "Value":{ "Fn::Join" : [ "", [{ "Ref": "AWS::StackName" }, "-LoadBalancerSG"]]} }
                 ]
             }
         },
@@ -136,15 +140,15 @@
                 "GroupDescription": "Only allow traffic via the Drone load balancer",
                 "SecurityGroupIngress": [
                     {
-                       "FromPort": 80,
-                       "IpProtocol": "tcp",
-                       "SourceSecurityGroupId": {"Ref": "LoadBalancerSecurityGroup"},
-                       "ToPort": 80
-                   }
+                        "FromPort": 80,
+                        "IpProtocol": "tcp",
+                        "SourceSecurityGroupId": {"Ref": "LoadBalancerSecurityGroup"},
+                        "ToPort": 80
+                    }
                 ],
                 "VpcId": {"Ref": "VPC"},
                 "Tags": [
-                    {"Key": "Name", "Value": "droneci-instance-sg"}
+                    {"Key": "Name", "Value": { "Fn::Join" : [ "", [{ "Ref": "AWS::StackName" }, "-InstanceSG"]]} }
                 ]
             }
         },
@@ -173,6 +177,7 @@
                                 {
                                     "Effect": "Allow",
                                     "Action": [
+                                        "ecs:CreateCluster",
                                         "ecs:DeregisterContainerInstance",
                                         "ecs:DiscoverPollEndpoint",
                                         "ecs:Poll",
@@ -182,7 +187,9 @@
                                         "ecr:GetAuthorizationToken",
                                         "ecr:BatchCheckLayerAvailability",
                                         "ecr:GetDownloadUrlForLayer",
-                                        "ecr:BatchGetImage"
+                                        "ecr:BatchGetImage",
+                                        "logs:CreateLogStream",
+                                        "logs:PutLogEvents"
                                     ],
                                     "Resource": "*"
                                 }
@@ -205,6 +212,7 @@
                         "Action": ["sts:AssumeRole"]
                     }]
                 },
+                "Path": "/",
                 "Policies": [
                     {
                         "PolicyName": "droneci-ecs-service-role",
@@ -216,8 +224,10 @@
                                     "ec2:AuthorizeSecurityGroupIngress",
                                     "ec2:Describe*",
                                     "elasticloadbalancing:DeregisterInstancesFromLoadBalancer",
+                                    "elasticloadbalancing:DeregisterTargets",
                                     "elasticloadbalancing:Describe*",
-                                    "elasticloadbalancing:RegisterInstancesWithLoadBalancer"
+                                    "elasticloadbalancing:RegisterInstancesWithLoadBalancer",
+                                    "elasticloadbalancing:RegisterTargets"
                                 ],
                                 "Resource": "*"
                             }]
@@ -235,23 +245,64 @@
             }
         },
 
-        "LoadBalancer": {
-            "Type": "AWS::ElasticLoadBalancing::LoadBalancer",
-            "Properties": {
-                "CrossZone": true,
-                "Subnets": {"Ref": "Subnets"},
-                "Listeners": [{
-                    "InstancePort": "80",
-                    "InstanceProtocol": "HTTP",
-                    "LoadBalancerPort": "80",
-                    "Protocol": "HTTP"
-                }],
-                "SecurityGroups": [
-                    {"Ref": "LoadBalancerSecurityGroup"}
+        "LoadBalancerTargetGroup" : {
+            "Type" : "AWS::ElasticLoadBalancingV2::TargetGroup",
+            "Properties" : {
+                "HealthCheckIntervalSeconds" : "30",
+                "HealthCheckPath" : "/login",
+                "HealthCheckPort" : "traffic-port",
+                "HealthCheckProtocol" : "HTTP",
+                "HealthCheckTimeoutSeconds" : "5",
+                "HealthyThresholdCount" : "5",
+                "Matcher" : { "HttpCode" : "200" },
+                "Name" : { "Fn::Join" : [ "", [{ "Ref": "AWS::StackName" }, "-ALBTargetGroup"]]},
+                "Port" : "80",
+                "Protocol" : "HTTP",
+                "Tags" : [
+                    {"Key": "Name", "Value": { "Fn::Join" : [ "", [{ "Ref": "AWS::StackName" }, "-ALBTargetGroup"]]} }
                 ],
-                "Tags": [
-                    {"Key": "Name", "Value": "droneci-loadbalancer"}
+                "TargetGroupAttributes" : [
+                    { "Key" : "deregistration_delay.timeout_seconds", "Value" : "300" },
+                    { "Key" : "stickiness.enabled", "Value" : "false" },
+                    { "Key" : "stickiness.type", "Value" : "lb_cookie" },
+                    { "Key" : "stickiness.lb_cookie.duration_seconds", "Value" : "86400" }
+                ],
+                "UnhealthyThresholdCount" : "2",
+                "VpcId" : { "Ref": "VPC" }
+            }
+        },
+
+        "LoadBalancer" : {
+            "Type" : "AWS::ElasticLoadBalancingV2::LoadBalancer",
+            "Properties" : {
+                "Subnets" : { "Ref": "Subnets" },
+                "LoadBalancerAttributes" : [
+                    { "Key" : "access_logs.s3.enabled", "Value" : "false" },
+                    { "Key" : "deletion_protection.enabled", "Value" : "false" },
+                    { "Key" : "idle_timeout.timeout_seconds", "Value" : "60" }
+                ],
+                "SecurityGroups" : [
+                    { "Ref": "LoadBalancerSecurityGroup" }
+                ],
+                "Scheme" : "internet-facing",
+                "Name" : { "Fn::Join" : [ "", [{ "Ref": "AWS::StackName" }, "-ALB"]]},
+                "Tags" : [
+                    {"Key": "Name", "Value": { "Fn::Join" : [ "", [{ "Ref": "AWS::StackName" }, "-ALB"]]} }
                 ]
+            }
+        },
+
+        "LoadBalancerSSLListener" : {
+            "Type" : "AWS::ElasticLoadBalancingV2::Listener",
+            "Properties" : {
+                "DefaultActions" : [{
+                    "TargetGroupArn" : { "Ref" : "LoadBalancerTargetGroup" },
+                    "Type" : "forward"
+                }],
+                "Certificates": [{ "CertificateArn" : { "Ref" : "CertificateArn" } }],
+                "LoadBalancerArn" : { "Ref" : "LoadBalancer" },
+                "Port" : "443",
+                "Protocol" : "HTTPS"
             }
         },
 
@@ -343,7 +394,7 @@
                 "LaunchConfigurationName": {"Ref": "LaunchConfiguration"},
                 "VPCZoneIdentifier": {"Ref": "Subnets"},
                 "Tags": [
-                    {"Key": "Name", "Value": "droneci", "PropagateAtLaunch": true}
+                    {"Key": "Name", "Value": { "Ref": "AWS::StackName" }, "PropagateAtLaunch": true}
                 ]
             }
         },
@@ -357,7 +408,7 @@
                 "LoadBalancers": [{
                     "ContainerName": "Drone",
                     "ContainerPort": "8000",
-                    "LoadBalancerName" : {"Ref": "LoadBalancer"}
+                    "TargetGroupArn" : { "Ref" : "LoadBalancerTargetGroup" }
                 }],
                 "Role": {"Ref": "ServiceRole"},
                 "TaskDefinition": {"Ref": "TaskDefinition"}
@@ -368,7 +419,7 @@
     "Outputs": {
         "OAuthEndpoint": {
             "Value": {"Fn::Join": ["", [
-                "http://", {"Fn::GetAtt": ["LoadBalancer", "DNSName"]}, "/authorize"
+                "https://", {"Fn::GetAtt": ["LoadBalancer", "DNSName"]}, "/authorize"
             ]]}
         }
     }
